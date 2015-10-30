@@ -75,13 +75,22 @@ def getData():
 	cell_size = float(request.args.get('cell_size'))
 
 	analysis = request.args.get('analysis')
-
+	heatmap = request.args.get('heatmap')
+	spread = request.args.get('spread')
+	if spread == "":
+		spread = 12
+	else:
+		try:
+			spread = int(spread)
+		except:
+			print "invalid spread value"
+			spread = 12
 	#CAPTURE ANY ADDITIONAL ARGUMENTS SENT FROM THE CLIENT HERE
-
+	print "spread=" + str(spread)
 	print "received coordinates: [" + lat1 + ", " + lat2 + "], [" + lng1 + ", " + lng2 + "]"
 	
 	client = pyorient.OrientDB("localhost", 2424)
-	session_id = client.connect("root", "password")
+	session_id = client.connect("root", "123456")
 	db_name = "soufun"
 	db_username = "admin"
 	db_password = "admin"
@@ -93,15 +102,15 @@ def getData():
 		print "database [" + db_name + "] does not exist! session ending..."
 		sys.exit()
 
-	query = 'SELECT FROM Listing WHERE latitude BETWEEN {} AND {} AND longitude BETWEEN {} AND {}'
+	query = 'SELECT FROM Listing WHERE latitude BETWEEN {} AND {} AND longitude BETWEEN {} AND {} AND prec = 1 AND conf > 60'
 
 	records = client.command(query.format(lat1, lat2, lng1, lng2))
 
 	#USE INFORMATION RECEIVED FROM CLIENT TO CONTROL 
 	#HOW MANY RECORDS ARE CONSIDERED IN THE ANALYSIS
-	
-	# random.shuffle(records)
-	# records = records[:100]
+	if heatmap == "true":
+		random.shuffle(records)
+		records = records[:100]
 
 	numListings = len(records)
 	print 'received ' + str(numListings) + ' records'
@@ -135,11 +144,12 @@ def getData():
 
 		output["features"].append(feature)
 
-	if analysis == "false":
-		q.put('idle')
-		return json.dumps(output)
+	if heatmap == "false":
+		if analysis == "false":
+			q.put('idle')
+			return json.dumps(output)
 
-	q.put('starting analysis...')
+	
 
 	output["analysis"] = []
 
@@ -155,111 +165,147 @@ def getData():
 
 	#USE CONDITIONAL ALONG WITH UI INFORMATION RECEIVED FROM THE CLIENT TO SWITCH
 	#BETWEEN HEAT MAP AND INTERPOLATION ANALYSIS
-
+	if heatmap == "true":
 	## HEAT MAP IMPLEMENTATION
-	# for record in records:
+		q.put('starting heatmap analysis...')
+		for record in records:
 
-	# 	pos_x = int(remap(record.longitude, lng1, lng2, 0, numW))
-	# 	pos_y = int(remap(record.latitude, lat1, lat2, numH, 0))
+			pos_x = int(remap(record.longitude, lng1, lng2, 0, numW))
+			pos_y = int(remap(record.latitude, lat1, lat2, numH, 0))
 
 	#USE INFORMATION RECEIVED FROM CLIENT TO CONTROL SPREAD OF HEAT MAP
-	# 	spread = 12
+			#spread = 12
+			if ((spread>0)and(spread<20)):
+				spread = spread
+			else :
+				spread = 12
+				print "spread = defult value"
 
-	# 	for j in range(max(0, (pos_y-spread)), min(numH, (pos_y+spread))):
-	# 		for i in range(max(0, (pos_x-spread)), min(numW, (pos_x+spread))):
-	# 			grid[j][i] += 2 * math.exp((-point_distance(i,j,pos_x,pos_y)**2)/(2*(spread/2)**2))
+			for j in range(max(0, (pos_y-spread)), min(numH, (pos_y+spread))):
+				for i in range(max(0, (pos_x-spread)), min(numW, (pos_x+spread))):
+					grid[j][i] += 2 * math.exp((-point_distance(i,j,pos_x,pos_y)**2)/(2*(spread/2)**2))
+		grid = normalizeArray(grid)
+
+		offsetLeft = (w - numW * cell_size) / 2.0
+		offsetTop = (h - numH * cell_size) / 2.0
+
+		for j in range(numH):
+			for i in range(numW):
+				newItem = {}
+
+				newItem['x'] = offsetLeft + i*cell_size
+				newItem['y'] = offsetTop + j*cell_size
+				newItem['width'] = cell_size-1
+				newItem['height'] = cell_size-1
+				newItem['value'] = grid[j][i]
+
+				output["analysis"].append(newItem)
+		if analysis == "false":
+			q.put('idle')
+		if analysis == "true":
+			q.put('cannot run both, run as heatmap')
+		return json.dumps(output)
 
 
 	## MACHINE LEARNING IMPLEMENTATION
+	if ((heatmap == "false") and (analysis == "true")):
+		q.put('starting interpolation analysis...')
+		featureData = []
+		targetData = []
 
-	featureData = []
-	targetData = []
+		for record in records:
+			featureData.append([record.latitude, record.longitude])
+			targetData.append(record.price)
 
-	for record in records:
-		featureData.append([record.latitude, record.longitude])
-		targetData.append(record.price)
+		X = np.asarray(featureData, dtype='float')
+		y = np.asarray(targetData, dtype='float')
 
-	X = np.asarray(featureData, dtype='float')
-	y = np.asarray(targetData, dtype='float')
+		breakpoint = int(numListings * .7)
 
-	breakpoint = int(numListings * .7)
-
-	print "length of dataset: " + str(numListings)
-	print "length of training set: " + str(breakpoint)
-	print "length of validation set: " + str(numListings-breakpoint)
+		print "length of dataset: " + str(numListings)
+		print "length of training set: " + str(breakpoint)
+		print "length of validation set: " + str(numListings-breakpoint)
 
 	# create training and validation set
-	X_train = X[:breakpoint]
-	X_val = X[breakpoint:]
+		X_train = X[:breakpoint]
+		X_val = X[breakpoint:]
 
-	y_train = y[:breakpoint]
-	y_val = y[breakpoint:]
+		y_train = y[:breakpoint]
+		y_val = y[breakpoint:]
 
 	#mean 0, variance 1
-	scaler = preprocessing.StandardScaler().fit(X_train)
-	X_train_scaled = scaler.transform(X_train)
+		scaler = preprocessing.StandardScaler().fit(X_train)
+		X_train_scaled = scaler.transform(X_train)
 
-	mse_min = 10000000000000000000000
+		mse_min = 10000000000000000000000
 
-	for C in [.01, 1, 100, 10000, 1000000]:
+		for C in [.01, 1, 100, 10000, 1000000]:
 
-		for e in [.01, 1, 100, 10000, 1000000]:
+			for e in [.01, 1, 100, 10000, 1000000]:
 
-				for g in [.01, 1, 100, 10000, 1000000]:
+					for g in [.01, 1, 100, 10000, 1000000]:
 
-					q.put("training model: C[" + str(C) + "], e[" + str(e) + "], g[" + str(g) + "]")
+						q.put("training model: C[" + str(C) + "], e[" + str(e) + "], g[" + str(g) + "]")
 
-					model = svm.SVR(C=C, epsilon=e, gamma=g, kernel='rbf', cache_size=2000)
-					model.fit(X_train_scaled, y_train)
+						model = svm.SVR(C=C, epsilon=e, gamma=g, kernel='rbf', cache_size=2000)
+						model.fit(X_train_scaled, y_train)
 
-					y_val_p = [model.predict(i) for i in X_val]
+						y_val_p = [model.predict(i) for i in X_val]
 
-					mse = 0
-					for i in range(len(y_val_p)):
-						mse += (y_val_p[i] - y_val[i]) ** 2
-					mse /= len(y_val_p)
+						mse = 0
+						for i in range(len(y_val_p)):
+							mse += (y_val_p[i] - y_val[i]) ** 2
+						mse /= len(y_val_p)
 
-					if mse < mse_min:
-						mse_min = mse
-						model_best = model
-						C_best = C
-						e_best = e
-						g_best = g
+						if mse < mse_min:
+							mse_min = mse
+							model_best = model
+							C_best = C
+							e_best = e
+							g_best = g
 
-	q.put("best model: C[" + str(C_best) + "], e[" + str(e_best) + "], g[" + str(g_best) + "]")
+		q.put("best model: C[" + str(C_best) + "], e[" + str(e_best) + "], g[" + str(g_best) + "]")
 
-	for j in range(numH):
-		for i in range(numW):
-			lat = remap(j, numH, 0, lat1, lat2)
-			lng = remap(i, 0, numW, lng1, lng2)
+		for j in range(numH):
+			for i in range(numW):
+				lat = remap(j, numH, 0, lat1, lat2)
+				lng = remap(i, 0, numW, lng1, lng2)
 
-			testData = [[lat, lng]]
-			X_test = np.asarray(testData, dtype='float')
-			X_test_scaled = scaler.transform(X_test)
-			grid[j][i] = model_best.predict(X_test_scaled)
+				testData = [[lat, lng]]
+				X_test = np.asarray(testData, dtype='float')
+				X_test_scaled = scaler.transform(X_test)
+				grid[j][i] = model_best.predict(X_test_scaled)
+		grid = normalizeArray(grid)
+
+		offsetLeft = (w - numW * cell_size) / 2.0
+		offsetTop = (h - numH * cell_size) / 2.0
+
+		for j in range(numH):
+			for i in range(numW):
+				newItem = {}
+
+				newItem['x'] = offsetLeft + i*cell_size
+				newItem['y'] = offsetTop + j*cell_size
+				newItem['width'] = cell_size-1
+				newItem['height'] = cell_size-1
+				newItem['value'] = grid[j][i]
+
+				output["analysis"].append(newItem)
+
+		q.put('idle')
+
+		return json.dumps(output)
 
 
 
-	grid = normalizeArray(grid)
 
-	offsetLeft = (w - numW * cell_size) / 2.0
-	offsetTop = (h - numH * cell_size) / 2.0
 
-	for j in range(numH):
-		for i in range(numW):
-			newItem = {}
 
-			newItem['x'] = offsetLeft + i*cell_size
-			newItem['y'] = offsetTop + j*cell_size
-			newItem['width'] = cell_size-1
-			newItem['height'] = cell_size-1
-			newItem['value'] = grid[j][i]
 
-			output["analysis"].append(newItem)
 
-	# q.put('idle')
 
-	return json.dumps(output)
+
+
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0',port=5000,debug=True,threaded=True)
